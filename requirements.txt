@@ -1,0 +1,8 @@
+pip install fastapi
+pip install uvicorn[standard]
+pip install psycopg2-binary
+pip install sqlalchemy
+pip install pydantic
+pip install python-dotenv
+pip install paho-mqtt==1.6.1
+pip install opcua
