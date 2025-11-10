@@ -118,9 +118,9 @@ def ingestas_by_asset_motor(
         db.query(Ingesta)
         .filter(Ingesta.asset_codigo == asset_codigo)
         .filter(Ingesta.motor_codigo == motor_codigo)
-        .filter(Ingesta.ts_utc >= ts_from)
-        .filter(Ingesta.ts_utc <= ts_to)
-        .order_by(desc(Ingesta.ts_utc), desc(Ingesta.ingesta_id))
+        .filter(Ingesta.ts_local_tz >= ts_from)
+        .filter(Ingesta.ts_local_tz <= ts_to)
+        .order_by(desc(Ingesta.ts_local_tz), desc(Ingesta.ingesta_id))
     )
 
     return q.all()
