@@ -1,31 +1,26 @@
-from pydantic import BaseModel, ConfigDict
-from typing import Optional
+from pydantic import BaseModel
 from datetime import datetime
-from decimal import Decimal
+from typing import Optional
 
 class MedicionBase(BaseModel):
     despliegue_id: int
     ts_utc: datetime
     variable: str
-    valor: Optional[Decimal] = None
+    valor: Optional[float] = None
     archivo_origen: Optional[str] = None
+    indicador_calidad: int = 0   # NUEVO
 
 class MedicionCreate(MedicionBase):
     pass
 
 class MedicionUpdate(BaseModel):
-    valor: Optional[Decimal] = None
-    archivo_origen: Optional[str] = None
+    valor: Optional[float] = None
+    indicador_calidad: Optional[int] = None
 
-class MedicionRead(BaseModel):
+class MedicionRead(MedicionBase):
     medicion_id: int
-    despliegue_id: int
-    ts_utc: datetime
-    ts_local: Optional[datetime]
-    variable: str
-    valor: Optional[Decimal]
-    archivo_origen: Optional[str]
-    importado_en: Optional[datetime]
-    asset_codigo: Optional[str]
-    motor_codigo: Optional[str]
-    model_config = ConfigDict(from_attributes=True)
+    ts_local_tz: Optional[datetime] = None
+    importado_en: datetime
+
+    class Config:
+        from_attributes = True

@@ -1,5 +1,8 @@
 # app/models/mediciones.py
-from sqlalchemy import Column, BigInteger, Text, Numeric, DateTime, Computed, text, ForeignKey
+from sqlalchemy import (
+    Column, BigInteger, Text, Numeric, DateTime,
+    Computed, text, ForeignKey, SmallInteger
+)
 from ..database import Base
 
 class Medicion(Base):
@@ -10,21 +13,36 @@ class Medicion(Base):
     despliegue_id = Column(
         BigInteger,
         ForeignKey("iot.despliegues.despliegue_id", ondelete="CASCADE"),
-        nullable=False,
+        nullable=False
     )
 
-    # DB: timestamptz
+    # TIMESTAMPTZ en BD
     ts_utc = Column(DateTime(timezone=True), nullable=False)
 
-   
-    ts_local = Column(
-        "ts_local_tz",                      
-        DateTime(timezone=False),
-        Computed("(ts_utc AT TIME ZONE 'America/Guayaquil')", persisted=True),
-        nullable=True,
+    # Columna generada en BD (ts_local_tz)
+    ts_local_tz = Column(
+        DateTime(timezone=True),
+        Computed(
+            "(ts_utc AT TIME ZONE 'UTC' AT TIME ZONE 'America/Guayaquil')",
+            persisted=True
+        ),
+        nullable=True
     )
 
-    variable       = Column(Text, nullable=False)
-    valor          = Column(Numeric, nullable=True)
+    variable = Column(Text, nullable=False)   # FK a iot.variables(variable) en BD
+    valor    = Column(Numeric, nullable=True)
+
+    indicador_calidad = Column(
+        SmallInteger,
+        ForeignKey("iot.indicador_calidad.codigo_calidad"),
+        server_default=text("0"),
+        nullable=False
+    )
+
     archivo_origen = Column(Text, nullable=True)
-    importado_en   = Column(DateTime(timezone=True), server_default=text("now()"), nullable=False)
+
+    importado_en = Column(
+        DateTime(timezone=True),
+        server_default=text("now()"),
+        nullable=False
+    )
