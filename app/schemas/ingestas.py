@@ -2,6 +2,7 @@ from pydantic import BaseModel, ConfigDict
 from typing import Optional
 from datetime import datetime
 from decimal import Decimal
+from typing import List
 
 class IngestaBase(BaseModel):
     asset_codigo: str
@@ -20,8 +21,13 @@ class IngestaUpdate(BaseModel):
     ts_local: Optional[datetime] = None
     valor: Optional[Decimal] = None
     archivo_origen: Optional[str] = None
+    
 
 class IngestaRead(IngestaBase):
     ingesta_id: int
     recibido_en: Optional[datetime] = None
     model_config = ConfigDict(from_attributes=True)
+
+class IngestaListResponse(BaseModel):
+    total: int
+    items: List[IngestaRead]
