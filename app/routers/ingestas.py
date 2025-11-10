@@ -104,6 +104,28 @@ def _validate_ingesta_payload(db: Session, p: IngestaCreate):
 # Endpoints
 # -------------------------
 
+@router.get("/by-asset-motor", response_model=List[IngestaRead])
+def ingestas_by_asset_motor(
+    asset_codigo: str,
+    motor_codigo: str,
+    ts_from: datetime,
+    ts_to: datetime,
+    db: Session = Depends(get_db),
+):
+    _validate_time_window(ts_from, ts_to)
+
+    q = (
+        db.query(Ingesta)
+        .filter(Ingesta.asset_codigo == asset_codigo)
+        .filter(Ingesta.motor_codigo == motor_codigo)
+        .filter(Ingesta.ts_utc >= ts_from)
+        .filter(Ingesta.ts_utc <= ts_to)
+        .order_by(desc(Ingesta.ts_utc), desc(Ingesta.ingesta_id))
+    )
+
+    return q.all()
+
+
 @router.get("/", response_model=List[IngestaRead])
 def list_ingestas(
     asset_codigo: Optional[str] = Query(None),

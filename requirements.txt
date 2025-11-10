@@ -6,3 +6,4 @@ pip install pydantic
 pip install python-dotenv
 pip install paho-mqtt==1.6.1
 pip install opcua
+pip install pydantic-settings
