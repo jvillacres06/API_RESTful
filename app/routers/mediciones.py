@@ -4,9 +4,6 @@ from typing import List, Optional
 from datetime import datetime, timezone, timedelta
 from fastapi.responses import StreamingResponse
 import io, csv
-
-from sqlalchemy import asc, desc
-
 from ..database import get_db
 from ..models.mediciones import Medicion
 from ..models.despliegues import Despliegue
@@ -16,6 +13,28 @@ from ..models.variables import Variable
 from ..schemas.mediciones import MedicionRead, MedicionCreate, MedicionUpdate
 from ..config import settings
 from ..mqtt_client import mqtt_client
+from fastapi import APIRouter, Depends, Query, HTTPException, status
+from sqlalchemy.orm import Session
+from sqlalchemy import asc, desc, text
+from typing import List, Optional
+from datetime import datetime
+from pydantic import BaseModel
+
+class ImportFromIngestasRequest(BaseModel):
+    asset_codigo: Optional[str] = None
+    motor_codigo: Optional[str] = None
+    variable: Optional[str] = None
+    ts_from: Optional[datetime] = None
+    ts_to: Optional[datetime] = None
+    indicador_calidad: int = 0   # 0 = OK, 1 = SOSPECHOSO, etc.
+
+
+class ImportFromIngestasResponse(BaseModel):
+    inserted: int
+
+
+router = APIRouter()
+
 
 router = APIRouter()
 
@@ -78,6 +97,78 @@ def _validate_medicion_payload(db: Session, p: MedicionCreate):
 # -------------------------
 # Endpoints de lectura
 # -------------------------
+
+@router.post("/import-from-ingestas", response_model=ImportFromIngestasResponse)
+def import_mediciones_from_ingestas(
+    payload: ImportFromIngestasRequest,
+    db: Session = Depends(get_db),
+):
+    """
+    Crea mediciones a partir de raw.ingestas, asignando despliegue_id
+    según asset/motor y rango de fechas (inicio/fin del despliegue).
+
+    Lógica:
+      - JOIN raw.ingestas -> iot.assets -> iot.motores -> iot.despliegues
+      - Condición de tiempo: ts_utc entre inicio y fin del despliegue
+      - Aplica filtros opcionales del payload
+      - Inserta en iot.mediciones
+      - ON CONFLICT (despliegue_id, ts_utc, variable) DO NOTHING
+        (no duplica mediciones)
+    """
+
+    sql = text("""
+        INSERT INTO iot.mediciones (
+            despliegue_id,
+            ts_utc,
+            variable,
+            valor,
+            indicador_calidad,
+            archivo_origen
+        )
+        SELECT
+            d.despliegue_id,
+            i.ts_utc,
+            i.variable,
+            i.valor,
+            :indicador_calidad AS indicador_calidad,
+            i.archivo_origen
+        FROM raw.ingestas i
+        JOIN iot.assets a
+          ON a.asset_codigo = i.asset_codigo
+        JOIN iot.motores m
+          ON m.motor_codigo = i.motor_codigo
+        JOIN iot.despliegues d
+          ON d.asset_id = a.asset_id
+         AND d.motor_id = m.motor_id
+         AND i.ts_utc >= d.inicio
+         AND (d.fin IS NULL OR i.ts_utc <= d.fin)
+        WHERE 1=1
+          AND (:asset_codigo IS NULL OR i.asset_codigo = :asset_codigo)
+          AND (:motor_codigo IS NULL OR i.motor_codigo = :motor_codigo)
+          AND (:variable     IS NULL OR i.variable     = :variable)
+          AND (:ts_from      IS NULL OR i.ts_utc >= :ts_from)
+          AND (:ts_to        IS NULL OR i.ts_utc <= :ts_to)
+        ON CONFLICT (despliegue_id, ts_utc, variable) DO NOTHING;
+    """)
+
+    result = db.execute(
+        sql,
+        {
+            "asset_codigo": payload.asset_codigo,
+            "motor_codigo": payload.motor_codigo,
+            "variable": payload.variable,
+            "ts_from": payload.ts_from,
+            "ts_to": payload.ts_to,
+            "indicador_calidad": payload.indicador_calidad,
+        },
+    )
+    db.commit()
+
+    # rowcount = cuántas filas se intentaron insertar,
+    # (las que chocan con el UNIQUE no se insertan pero no dan error)
+    inserted = result.rowcount or 0
+    return ImportFromIngestasResponse(inserted=inserted)
+
 
 @router.get("/latest", response_model=List[MedicionRead])
 def latest_mediciones(
