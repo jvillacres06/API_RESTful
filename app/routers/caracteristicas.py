@@ -21,7 +21,7 @@ from ..schemas.caracteristicas import (
 
 router = APIRouter()
 
-# Límites de negocio para listados/export
+# Límites de negocio
 MAX_LIMIT = 1000
 DEFAULT_LIMIT = 100
 MAX_CSV_ROWS = 50_000
@@ -31,9 +31,9 @@ def _clamp_limit(limit: int) -> int:
     return max(1, min(limit, MAX_LIMIT))
 
 
-# ==========================
-# LISTADOS
-# ==========================
+# ============================================================
+# LISTADOS (TODO usando ts_local_tz)
+# ============================================================
 
 @router.get("/", response_model=List[CaracteristicaRead])
 def list_caracteristicas(
@@ -46,19 +46,17 @@ def list_caracteristicas(
     ts_from: Optional[datetime] = Query(None),
     ts_to: Optional[datetime] = Query(None),
     sort: str = Query(
-        "-ts_utc",
-        description="Campo para ordenar. Ej: ts_utc, -ts_utc, variable, -variable, caracteristica, -caracteristica",
+        "-ts_local_tz",
+        description="Ej: ts_local_tz, -ts_local_tz, variable, -variable"
     ),
     limit: int = Query(DEFAULT_LIMIT, ge=1, le=MAX_LIMIT),
     offset: int = Query(0, ge=0),
     db: Session = Depends(get_db),
 ):
     """
-    Listado de características con filtros por:
-    - asset_codigo, motor_codigo (via JOIN despliegues/assets/motores)
-    - variable, caracteristica, ventana_s, indicador_calidad
-    - rango de fechas ts_from / ts_to
+    Listado de características usando hora local (ts_local_tz).
     """
+
     q = (
         db.query(Caracteristica)
         .join(Despliegue, Caracteristica.despliegue_id == Despliegue.despliegue_id)
@@ -66,6 +64,7 @@ def list_caracteristicas(
         .join(Motor, Despliegue.motor_id == Motor.motor_id)
     )
 
+    # Filtros
     if asset_codigo:
         q = q.filter(Asset.asset_codigo == asset_codigo)
     if motor_codigo:
@@ -78,24 +77,26 @@ def list_caracteristicas(
         q = q.filter(Caracteristica.ventana_s == ventana_s)
     if indicador_calidad is not None:
         q = q.filter(Caracteristica.indicador_calidad == indicador_calidad)
-    if ts_from:
-        q = q.filter(Caracteristica.ts_utc >= ts_from)
-    if ts_to:
-        q = q.filter(Caracteristica.ts_utc <= ts_to)
 
+    # FILTRO TEMPORAL - AHORA por ts_local_tz
+    if ts_from:
+        q = q.filter(Caracteristica.ts_local_tz >= ts_from)
+    if ts_to:
+        q = q.filter(Caracteristica.ts_local_tz <= ts_to)
+
+    # Orden
     sort_map = {
         "ts_utc": Caracteristica.ts_utc,
         "-ts_utc": desc(Caracteristica.ts_utc),
+        "ts_local_tz": Caracteristica.ts_local_tz,
+        "-ts_local_tz": desc(Caracteristica.ts_local_tz),
         "variable": Caracteristica.variable,
         "-variable": desc(Caracteristica.variable),
         "caracteristica": Caracteristica.caracteristica,
         "-caracteristica": desc(Caracteristica.caracteristica),
-        "ventana_s": Caracteristica.ventana_s,
-        "-ventana_s": desc(Caracteristica.ventana_s),
-        "indicador_calidad": Caracteristica.indicador_calidad,
-        "-indicador_calidad": desc(Caracteristica.indicador_calidad),
     }
-    sort_col = sort_map.get(sort, desc(Caracteristica.ts_utc))
+
+    sort_col = sort_map.get(sort, desc(Caracteristica.ts_local_tz))
     q = q.order_by(sort_col)
 
     return q.offset(offset).limit(_clamp_limit(limit)).all()
@@ -106,12 +107,9 @@ def latest_caracteristicas(
     limit: int = Query(DEFAULT_LIMIT, ge=1, le=MAX_LIMIT),
     db: Session = Depends(get_db),
 ):
-    """
-    Últimas N características (ordenadas por ts_utc, caracteristica_id desc)
-    """
     return (
         db.query(Caracteristica)
-        .order_by(desc(Caracteristica.ts_utc), desc(Caracteristica.caracteristica_id))
+        .order_by(desc(Caracteristica.ts_local_tz), desc(Caracteristica.caracteristica_id))
         .limit(_clamp_limit(limit))
         .all()
     )
@@ -122,16 +120,17 @@ def last_n_caracteristicas(
     n: int,
     db: Session = Depends(get_db),
 ):
-    """
-    Últimas N características (path param).
-    """
     return (
         db.query(Caracteristica)
-        .order_by(desc(Caracteristica.ts_utc), desc(Caracteristica.caracteristica_id))
+        .order_by(desc(Caracteristica.ts_local_tz), desc(Caracteristica.caracteristica_id))
         .limit(_clamp_limit(n))
         .all()
     )
 
+
+# ============================================================
+# EXPORTACIÓN CSV USANDO ts_local_tz
+# ============================================================
 
 @router.get("/export/csv")
 def export_caracteristicas_csv(
@@ -145,91 +144,72 @@ def export_caracteristicas_csv(
     ts_to: Optional[datetime] = None,
     db: Session = Depends(get_db),
 ):
-    """
-    Exportar características a CSV con filtros.
-    Incluye asset_codigo y motor_codigo en el archivo.
-    """
     q = (
-        db.query(
-            Caracteristica,
-            Asset.asset_codigo,
-            Motor.motor_codigo,
-        )
+        db.query(Caracteristica, Asset.asset_codigo, Motor.motor_codigo)
         .join(Despliegue, Caracteristica.despliegue_id == Despliegue.despliegue_id)
         .join(Asset, Despliegue.asset_id == Asset.asset_id)
         .join(Motor, Despliegue.motor_id == Motor.motor_id)
     )
 
-    if asset_codigo:
-        q = q.filter(Asset.asset_codigo == asset_codigo)
-    if motor_codigo:
-        q = q.filter(Motor.motor_codigo == motor_codigo)
-    if variable:
-        q = q.filter(Caracteristica.variable == variable)
-    if caracteristica:
-        q = q.filter(Caracteristica.caracteristica == caracteristica)
-    if ventana_s is not None:
-        q = q.filter(Caracteristica.ventana_s == ventana_s)
-    if indicador_calidad is not None:
-        q = q.filter(Caracteristica.indicador_calidad == indicador_calidad)
-    if ts_from:
-        q = q.filter(Caracteristica.ts_utc >= ts_from)
-    if ts_to:
-        q = q.filter(Caracteristica.ts_utc <= ts_to)
+    # filtros
+    if asset_codigo: q = q.filter(Asset.asset_codigo == asset_codigo)
+    if motor_codigo: q = q.filter(Motor.motor_codigo == motor_codigo)
+    if variable: q = q.filter(Caracteristica.variable == variable)
+    if caracteristica: q = q.filter(Caracteristica.caracteristica == caracteristica)
+    if ventana_s is not None: q = q.filter(Caracteristica.ventana_s == ventana_s)
+    if indicador_calidad is not None: q = q.filter(Caracteristica.indicador_calidad == indicador_calidad)
 
-    q = q.order_by(asc(Caracteristica.ts_utc)).limit(MAX_CSV_ROWS + 1)
+    # filtro temporal por ts_local_tz
+    if ts_from: q = q.filter(Caracteristica.ts_local_tz >= ts_from)
+    if ts_to: q = q.filter(Caracteristica.ts_local_tz <= ts_to)
+
+    q = q.order_by(asc(Caracteristica.ts_local_tz)).limit(MAX_CSV_ROWS + 1)
     rows = q.all()
+
     if len(rows) > MAX_CSV_ROWS:
-        raise HTTPException(
-            status_code=413,
-            detail=f"Demasiadas filas para exportar (> {MAX_CSV_ROWS}). Aplique más filtros.",
-        )
+        raise HTTPException(413, f"Demasiadas filas (> {MAX_CSV_ROWS})")
 
     stream = io.StringIO()
     w = csv.writer(stream)
-    w.writerow(
-        [
-            "caracteristica_id",
-            "asset_codigo",
-            "motor_codigo",
-            "despliegue_id",
-            "ts_utc",
-            "ts_local_tz",
-            "variable",
-            "caracteristica",
-            "valor",
-            "ventana_s",
-            "indicador_calidad",
-            "generado_en",
-        ]
-    )
+    w.writerow([
+        "caracteristica_id",
+        "asset_codigo",
+        "motor_codigo",
+        "despliegue_id",
+        "ts_utc",
+        "ts_local_tz",
+        "variable",
+        "caracteristica",
+        "valor",
+        "ventana_s",
+        "indicador_calidad",
+        "generado_en",
+    ])
 
     for c, a_code, m_code in rows:
-        w.writerow(
-            [
-                c.caracteristica_id,
-                a_code,
-                m_code,
-                c.despliegue_id,
-                c.ts_utc,
-                c.ts_local_tz,
-                c.variable,
-                c.caracteristica,
-                c.valor,
-                c.ventana_s,
-                c.indicador_calidad,
-                c.generado_en,
-            ]
-        )
+        w.writerow([
+            c.caracteristica_id,
+            a_code,
+            m_code,
+            c.despliegue_id,
+            c.ts_utc,
+            c.ts_local_tz,
+            c.variable,
+            c.caracteristica,
+            c.valor,
+            c.ventana_s,
+            c.indicador_calidad,
+            c.generado_en,
+        ])
 
     stream.seek(0)
     headers = {"Content-Disposition": "attachment; filename=caracteristicas.csv"}
     return StreamingResponse(stream, media_type="text/csv", headers=headers)
 
 
-# ==========================
-# CRUD BÁSICO
-# ==========================
+# ============================================================
+# CRUD
+# ============================================================
 
 @router.get("/{caracteristica_id}", response_model=CaracteristicaRead)
 def get_caracteristica(
@@ -292,6 +272,7 @@ def delete_caracteristica(
     )
     if not row:
         raise HTTPException(404, "Característica no encontrada")
+
     db.delete(row)
     db.commit()
     return

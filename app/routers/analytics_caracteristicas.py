@@ -1,8 +1,9 @@
 # app/routers/analytics_caracteristicas.py
+
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
-from sqlalchemy import select, func, and_, text, asc
+from sqlalchemy import select, func, and_, text, asc, desc
 from typing import Iterable, List, Optional
 from datetime import datetime
 import csv
@@ -24,14 +25,13 @@ from ..schemas.analytics_caracteristicas import (
 
 router = APIRouter()
 
-# -------------------------------
-# Reglas de negocio
-# -------------------------------
-
-MAX_TREND_POINTS: int = 10_000
-MAX_SCATTER_POINTS: int = 10_000
-MAX_HIST_BINS: int = 200
-MAX_EXPORT_ROWS: int = 200_000
+# -------------------------------------
+# Límites del sistema
+# -------------------------------------
+MAX_TREND_POINTS = 10_000
+MAX_SCATTER_POINTS = 10_000
+MAX_HIST_BINS = 200
+MAX_EXPORT_ROWS = 200_000
 
 
 def _clamp_limit(limit: int, max_limit: int) -> int:
@@ -40,99 +40,95 @@ def _clamp_limit(limit: int, max_limit: int) -> int:
 
 def _validate_time_window(ts_from: Optional[datetime], ts_to: Optional[datetime]):
     if ts_from and ts_to and ts_from > ts_to:
-        raise HTTPException(status_code=400, detail="ts_from no puede ser mayor que ts_to")
+        raise HTTPException(400, "ts_from no puede ser mayor que ts_to")
 
 
-# -------------------------------
-# Helpers
-# -------------------------------
-
+# ============================================================
+# Helper principal → APLICAR FILTROS usando ts_local_tz
+# ============================================================
 def _apply_filters(q, req: BaseFiltrosCaracteristicas, db: Session):
-    """
-    Aplica filtros opcionales por despliegue/asset/motor y rango de fechas
-    sobre Caracteristica.
-    """
     conds = []
 
+    # --------------- FILTRO POR FECHAS EN HORA LOCAL ---------------
     if getattr(req, "ts_from", None) is not None:
-        conds.append(Caracteristica.ts_utc >= req.ts_from)
-    if getattr(req, "ts_to", None) is not None:
-        conds.append(Caracteristica.ts_utc <= req.ts_to)
+        conds.append(Caracteristica.ts_local_tz >= req.ts_from)
 
+    if getattr(req, "ts_to", None) is not None:
+        conds.append(Caracteristica.ts_local_tz <= req.ts_to)
+
+    # --------------- FILTRO POR DESPLIEGUE DIRECTO ----------------
     if getattr(req, "despliegue_id", None):
         conds.append(Caracteristica.despliegue_id == req.despliegue_id)
         return q.where(and_(*conds))
 
-    # Si filtra por asset/motor se hace JOIN con despliegues/assets/motores
-    join_needed = (getattr(req, "asset_codigo", None) is not None) or (
-        getattr(req, "motor_codigo", None) is not None
-    )
+    # --------------- Si filtra asset o motor → JOIN ---------------
+    join_needed = (getattr(req, "asset_codigo", None) is not None) or \
+                  (getattr(req, "motor_codigo", None) is not None)
+
     if join_needed:
         q = (
             q.join(Despliegue, Despliegue.despliegue_id == Caracteristica.despliegue_id)
              .join(Asset, Asset.asset_id == Despliegue.asset_id)
              .join(Motor, Motor.motor_id == Despliegue.motor_id)
         )
+
         if getattr(req, "asset_codigo", None):
             conds.append(Asset.asset_codigo == req.asset_codigo)
+
         if getattr(req, "motor_codigo", None):
             conds.append(Motor.motor_codigo == req.motor_codigo)
 
     if conds:
         q = q.where(and_(*conds))
+
     return q
 
 
-def _date_trunc_unit(align: str):
-    if align == "minute":
-        return "minute"
-    if align == "hour":
-        return "hour"
-    return None  # exact
+# ============================================================
+# Trend (Series de tiempo)
+# ============================================================
 
-
-# -------------------------------
-# Endpoints
-# -------------------------------
-
-@router.post("/caracteristicas/trend", response_model=CaracTrendResponse,
-             summary="Series de tiempo de características")
+@router.post("/caracteristicas/trend", response_model=CaracTrendResponse)
 def carac_trend(req: CaracTrendRequest, db: Session = Depends(get_db)):
-    # Reglas de negocio
+
     if not req.variables:
-        raise HTTPException(status_code=400, detail="Debe especificar al menos una variable")
+        raise HTTPException(400, "Debe especificar variables")
     if not req.caracteristicas:
-        raise HTTPException(status_code=400, detail="Debe especificar al menos una caracteristica")
+        raise HTTPException(400, "Debe especificar características")
 
     _validate_time_window(req.ts_from, req.ts_to)
+
     limit = _clamp_limit(req.limit, MAX_TREND_POINTS)
 
-    series_out: List[CaracSeries] = []
+    series_out = []
 
     for var in req.variables:
         for car in req.caracteristicas:
-            q = select(Caracteristica.ts_utc, Caracteristica.valor).where(
+
+            q = select(
+                Caracteristica.ts_local_tz,
+                Caracteristica.valor
+            ).where(
                 and_(
                     Caracteristica.variable == var,
-                    Caracteristica.caracteristica == car,
+                    Caracteristica.caracteristica == car
                 )
             )
-            q = _apply_filters(q, req, db).order_by(Caracteristica.ts_utc.asc()).limit(limit)
+
+            q = _apply_filters(q, req, db).order_by(Caracteristica.ts_local_tz.asc()).limit(limit)
 
             rows = db.execute(q).all()
+
             points = [
-                CaracPoint(
-                    ts_utc=r[0],
-                    valor=float(r[1]) if r[1] is not None else None
-                )
+                CaracPoint(ts_local_tz=r[0], valor=float(r[1]) if r[1] is not None else None)
                 for r in rows
             ]
-            nombre = f"{var}:{car}"
+
             series_out.append(
                 CaracSeries(
                     variable=var,
                     caracteristica=car,
-                    nombre=nombre,
+                    nombre=f"{var}:{car}",
                     points=points,
                 )
             )
@@ -140,42 +136,33 @@ def carac_trend(req: CaracTrendRequest, db: Session = Depends(get_db)):
     return CaracTrendResponse(series=series_out)
 
 
-@router.post("/caracteristicas/scatter", response_model=CaracScatterResponse,
-             summary="Scatter entre dos características de la misma variable")
+# ============================================================
+# Scatter
+# ============================================================
+
+@router.post("/caracteristicas/scatter", response_model=CaracScatterResponse)
 def carac_scatter(req: CaracScatterRequest, db: Session = Depends(get_db)):
-    # Reglas de negocio: una sola variable, dos características
+
     if not req.variable:
-        raise HTTPException(
-            status_code=400,
-            detail="Debe enviar una variable en 'variable' para el scatter"
-        )
+        raise HTTPException(400, "Debe enviar una variable")
     if not req.caracteristica_x or not req.caracteristica_y:
-        raise HTTPException(
-            status_code=400,
-            detail="Debe enviar caracteristica_x y caracteristica_y"
-        )
+        raise HTTPException(400, "Debe enviar caracteristica_x y caracteristica_y")
 
     _validate_time_window(req.ts_from, req.ts_to)
     limit = _clamp_limit(req.limit, MAX_SCATTER_POINTS)
 
-    unit = _date_trunc_unit(req.align)
-
-    # Tabla base con filtros comunes
+    # Tabla base
     base = select(
         Caracteristica.despliegue_id,
         Caracteristica.variable,
         Caracteristica.caracteristica,
         Caracteristica.valor,
-        Caracteristica.ts_utc
+        Caracteristica.ts_local_tz
     ).where(Caracteristica.variable == req.variable)
 
     base = _apply_filters(base, req, db).subquery("base")
 
-    # Derivadas para cada característica
-    if unit:
-        tcol = func.date_trunc(unit, base.c.ts_utc).label("bucket_ts")
-    else:
-        tcol = base.c.ts_utc.label("bucket_ts")
+    tcol = base.c.ts_local_tz.label("bucket_ts")
 
     a = select(
         base.c.despliegue_id.label("d1"),
@@ -189,15 +176,15 @@ def carac_scatter(req: CaracScatterRequest, db: Session = Depends(get_db)):
         base.c.valor.label("y")
     ).where(base.c.caracteristica == req.caracteristica_y).subquery("b")
 
-    # Join por despliegue y bucket de tiempo
     j = select(a.c.bucket_ts, a.c.x, b.c.y).where(
         and_(a.c.d1 == b.c.d2, a.c.bucket_ts == b.c.bucket_ts)
     ).order_by(a.c.bucket_ts.asc()).limit(limit)
 
     rows = db.execute(j).all()
+
     points = [
         CaracScatterPoint(
-            ts_utc=r[0],
+            ts_local_tz=r[0],
             x=float(r[1]) if r[1] is not None else None,
             y=float(r[2]) if r[2] is not None else None
         )
@@ -212,19 +199,19 @@ def carac_scatter(req: CaracScatterRequest, db: Session = Depends(get_db)):
     )
 
 
-@router.post("/caracteristicas/histogram", response_model=CaracHistogramResponse,
-             summary="Histograma de una característica")
+# ============================================================
+# Histogram
+# ============================================================
+
+@router.post("/caracteristicas/histogram", response_model=CaracHistogramResponse)
 def carac_histogram(req: CaracHistogramRequest, db: Session = Depends(get_db)):
-    # Reglas de negocio
+
     if req.bins < 1 or req.bins > MAX_HIST_BINS:
-        raise HTTPException(
-            status_code=400,
-            detail=f"bins debe estar entre 1 y {MAX_HIST_BINS}"
-        )
+        raise HTTPException(400, f"bins debe estar entre 1 y {MAX_HIST_BINS}")
 
     _validate_time_window(req.ts_from, req.ts_to)
 
-    # 1) rango min/max
+    # Rango min/max en hora local
     q_mm = select(
         func.min(Caracteristica.valor),
         func.max(Caracteristica.valor)
@@ -234,6 +221,7 @@ def carac_histogram(req: CaracHistogramRequest, db: Session = Depends(get_db)):
             Caracteristica.caracteristica == req.caracteristica
         )
     )
+
     q_mm = _apply_filters(q_mm, req, db)
     vmin, vmax = db.execute(q_mm).one()
 
@@ -248,24 +236,17 @@ def carac_histogram(req: CaracHistogramRequest, db: Session = Depends(get_db)):
         )
 
     if vmin == vmax:
-        bucket = CaracHistogramBucket(
-            bucket=1,
-            low=float(vmin),
-            high=float(vmax),
-            count=0
-        )
         return CaracHistogramResponse(
             variable=req.variable,
             caracteristica=req.caracteristica,
             min=float(vmin),
             max=float(vmax),
             bins=1,
-            buckets=[bucket]
+            buckets=[CaracHistogramBucket(bucket=1, low=float(vmin), high=float(vmax), count=0)]
         )
 
     width = (vmax - vmin) / req.bins
 
-    # 2) contar con width_bucket (SQL textual)
     sql = text("""
         SELECT
           width_bucket(c.valor, :vmin, :vmax, :bins) AS b,
@@ -278,14 +259,15 @@ def carac_histogram(req: CaracHistogramRequest, db: Session = Depends(get_db)):
         JOIN iot.motores mo    ON mo.motor_id     = d.motor_id
         WHERE c.variable = :var
           AND c.caracteristica = :car
-          AND (:from_ts IS NULL OR c.ts_utc >= :from_ts)
-          AND (:to_ts   IS NULL OR c.ts_utc <= :to_ts)
+          AND (:from_ts IS NULL OR c.ts_local_tz >= :from_ts)
+          AND (:to_ts   IS NULL OR c.ts_local_tz <= :to_ts)
           AND (:despliegue_id IS NULL OR c.despliegue_id = :despliegue_id)
           AND (:asset_codigo  IS NULL OR a.asset_codigo = :asset_codigo)
           AND (:motor_codigo  IS NULL OR mo.motor_codigo = :motor_codigo)
         GROUP BY b
         ORDER BY b
     """)
+
     rows = db.execute(sql, {
         "vmin": vmin,
         "vmax": vmax,
@@ -302,8 +284,8 @@ def carac_histogram(req: CaracHistogramRequest, db: Session = Depends(get_db)):
     buckets = [
         CaracHistogramBucket(
             bucket=int(r.b),
-            low=float(r.low) if r.low is not None else float(vmin),
-            high=float(r.high) if r.high is not None else float(vmin + width),
+            low=float(r.low),
+            high=float(r.high),
             count=int(r.cnt)
         )
         for r in rows
@@ -319,23 +301,25 @@ def carac_histogram(req: CaracHistogramRequest, db: Session = Depends(get_db)):
     )
 
 
+# ============================================================
+# Available Variables
+# ============================================================
+
 @router.get("/caracteristicas/available-variables",
-            response_model=CaracAvailableVariablesResponse,
-            summary="Variables disponibles en características")
+            response_model=CaracAvailableVariablesResponse)
 def carac_available_variables(
     despliegue_id: Optional[int] = None,
     asset_codigo: Optional[str] = None,
     motor_codigo: Optional[str] = None,
     ts_from: Optional[datetime] = None,
     ts_to: Optional[datetime] = None,
-    db: Session = Depends(get_db),
+    db: Session = Depends(get_db)
 ):
     _validate_time_window(ts_from, ts_to)
 
-    class _R:  # request sintético para reusar _apply_filters
-        pass
+    class R: pass
 
-    req = _R()
+    req = R()
     req.despliegue_id = despliegue_id
     req.asset_codigo = asset_codigo
     req.motor_codigo = motor_codigo
@@ -345,27 +329,30 @@ def carac_available_variables(
     q = select(Caracteristica.variable).distinct()
     q = _apply_filters(q, req, db).order_by(Caracteristica.variable.asc())
 
-    vars_ = [r[0] for r in db.execute(q).all()]
-    return CaracAvailableVariablesResponse(variables=vars_)
+    variables = [r[0] for r in db.execute(q).all()]
 
+    return CaracAvailableVariablesResponse(variables=variables)
+
+
+# ============================================================
+# Available Características
+# ============================================================
 
 @router.get("/caracteristicas/available-caracteristicas",
-            response_model=CaracAvailableCaracteristicasResponse,
-            summary="Características disponibles")
+            response_model=CaracAvailableCaracteristicasResponse)
 def carac_available_caracteristicas(
     despliegue_id: Optional[int] = None,
     asset_codigo: Optional[str] = None,
     motor_codigo: Optional[str] = None,
     ts_from: Optional[datetime] = None,
     ts_to: Optional[datetime] = None,
-    db: Session = Depends(get_db),
+    db: Session = Depends(get_db)
 ):
     _validate_time_window(ts_from, ts_to)
 
-    class _R:
-        pass
+    class R: pass
 
-    req = _R()
+    req = R()
     req.despliegue_id = despliegue_id
     req.asset_codigo = asset_codigo
     req.motor_codigo = motor_codigo
@@ -375,11 +362,16 @@ def carac_available_caracteristicas(
     q = select(Caracteristica.caracteristica).distinct()
     q = _apply_filters(q, req, db).order_by(Caracteristica.caracteristica.asc())
 
-    cars = [r[0] for r in db.execute(q).all()]
-    return CaracAvailableCaracteristicasResponse(caracteristicas=cars)
+    características = [r[0] for r in db.execute(q).all()]
+
+    return CaracAvailableCaracteristicasResponse(caracteristicas=características)
 
 
-@router.get("/caracteristicas/export-csv", summary="Exportar características a CSV")
+# ============================================================
+# Export CSV (solo ts_local_tz)
+# ============================================================
+
+@router.get("/caracteristicas/export-csv")
 def carac_export_csv(
     variables: List[str],
     caracteristicas: Optional[List[str]] = None,
@@ -389,18 +381,18 @@ def carac_export_csv(
     ts_from: Optional[datetime] = None,
     ts_to: Optional[datetime] = None,
     limit: int = 200_000,
-    db: Session = Depends(get_db),
+    db: Session = Depends(get_db)
 ):
+
     if not variables:
-        raise HTTPException(status_code=400, detail="Debe especificar al menos una variable")
+        raise HTTPException(400, "Debe especificar variables")
 
     _validate_time_window(ts_from, ts_to)
     limit = _clamp_limit(limit, MAX_EXPORT_ROWS)
 
-    class _R:
-        pass
+    class R: pass
 
-    req = _R()
+    req = R()
     req.despliegue_id = despliegue_id
     req.asset_codigo = asset_codigo
     req.motor_codigo = motor_codigo
@@ -408,7 +400,7 @@ def carac_export_csv(
     req.ts_to = ts_to
 
     q = select(
-        Caracteristica.ts_utc,
+        Caracteristica.ts_local_tz,
         Caracteristica.variable,
         Caracteristica.caracteristica,
         Caracteristica.valor,
@@ -418,20 +410,21 @@ def carac_export_csv(
     if caracteristicas:
         q = q.where(Caracteristica.caracteristica.in_(caracteristicas))
 
-    q = _apply_filters(q, req, db).order_by(Caracteristica.ts_utc.asc()).limit(limit)
+    q = _apply_filters(q, req, db).order_by(Caracteristica.ts_local_tz.asc()).limit(limit)
 
     rows = db.execute(q).all()
 
-    def _gen() -> Iterable[bytes]:
+    def _gen():
         buf = io.StringIO()
         w = csv.writer(buf)
-        w.writerow(["ts_utc", "variable", "caracteristica", "valor", "despliegue_id"])
+
+        w.writerow(["ts_local_tz", "variable", "caracteristica", "valor", "despliegue_id"])
         yield buf.getvalue().encode("utf-8")
         buf.seek(0)
         buf.truncate(0)
 
         for r in rows:
-            w.writerow([r.ts_utc.isoformat(), r.variable, r.caracteristica, r.valor, r.despliegue_id])
+            w.writerow([r.ts_local_tz, r.variable, r.caracteristica, r.valor, r.despliegue_id])
             yield buf.getvalue().encode("utf-8")
             buf.seek(0)
             buf.truncate(0)

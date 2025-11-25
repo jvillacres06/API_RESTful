@@ -39,7 +39,6 @@ class Medicion(Base):
         nullable=False
     )
 
-    archivo_origen = Column(Text, nullable=True)
 
     importado_en = Column(
         DateTime(timezone=True),

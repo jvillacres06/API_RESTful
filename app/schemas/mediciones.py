@@ -7,7 +7,6 @@ class MedicionBase(BaseModel):
     ts_utc: datetime
     variable: str
     valor: Optional[float] = None
-    archivo_origen: Optional[str] = None
     indicador_calidad: int = 0   # NUEVO
 
 class MedicionCreate(MedicionBase):

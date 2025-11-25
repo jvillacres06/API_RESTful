@@ -63,7 +63,7 @@ def _validate_ingesta_payload(db: Session, p: IngestaCreate):
     # 2) variable debe existir/permitida
     if p.variable:
         # validar que exista en catálogo
-        if not db.query(Variable).filter(Variable.nombre == p.variable).first():
+        if not db.query(Variable).filter(Variable.variable == p.variable).first():
             raise HTTPException(400, "variable no registrada en catálogo de variables")
         # y si hay regla de rango, validarla
         r = VARIABLE_RULES.get(p.variable)
@@ -95,6 +95,7 @@ def _validate_ingesta_payload(db: Session, p: IngestaCreate):
             Ingesta.ts_utc >= p.ts_utc - timedelta(seconds=1),
             Ingesta.ts_utc <= p.ts_utc + timedelta(seconds=1),
         )
+        .filter(Ingesta.ingesta_id != Ingesta.ingesta_id)  
         .first()
     )
     if dup:
