@@ -4,7 +4,7 @@ from fastapi import APIRouter, Depends, Query, HTTPException, status
 from sqlalchemy.orm import Session
 from sqlalchemy import desc, asc
 from typing import List, Optional
-from datetime import datetime
+from datetime import datetime, timezone
 from fastapi.responses import StreamingResponse
 import io, csv
 
@@ -19,6 +19,8 @@ from ..schemas.caracteristicas import (
     CaracteristicaUpdate,
 )
 
+from pydantic import BaseModel
+
 router = APIRouter()
 
 # Límites de negocio
@@ -29,6 +31,23 @@ MAX_CSV_ROWS = 50_000
 
 def _clamp_limit(limit: int) -> int:
     return max(1, min(limit, MAX_LIMIT))
+
+
+# ============================================================
+# MODELOS PARA INSERCIÓN MASIVA (BULK)
+# ============================================================
+
+class BulkCaracteristicasRequest(BaseModel):
+    """
+    Inserción masiva de características.
+    items: lista de CaracteristicaCreate (misma estructura que el POST normal).
+    """
+    items: List[CaracteristicaCreate]
+
+
+class BulkCaracteristicasResponse(BaseModel):
+    inserted: int
+    skipped: int
 
 
 # ============================================================
@@ -205,6 +224,78 @@ def export_caracteristicas_csv(
     stream.seek(0)
     headers = {"Content-Disposition": "attachment; filename=caracteristicas.csv"}
     return StreamingResponse(stream, media_type="text/csv", headers=headers)
+
+
+# ============================================================
+# INSERCIÓN MASIVA (BULK)
+# ============================================================
+
+@router.post("/bulk", response_model=BulkCaracteristicasResponse,
+             status_code=status.HTTP_201_CREATED)
+def bulk_create_caracteristicas(
+    payload: BulkCaracteristicasRequest,
+    db: Session = Depends(get_db),
+):
+    """
+    Inserta muchas características en un solo request y un solo commit.
+
+    - Recibe: { "items": [ CaracteristicaCreate, ... ] }
+    - Normaliza ts_utc a UTC si viene sin timezone.
+    - Valida que el despliegue exista.
+    """
+
+    if not payload.items:
+        return BulkCaracteristicasResponse(inserted=0, skipped=0)
+
+    # Cargar despliegues necesarios en memoria
+    despl_ids = {item.despliegue_id for item in payload.items if item.despliegue_id is not None}
+    if despl_ids:
+        despliegues = (
+            db.query(Despliegue)
+            .filter(Despliegue.despliegue_id.in_(despl_ids))
+            .all()
+        )
+        despl_map = {d.despliegue_id: d for d in despliegues}
+    else:
+        despl_map = {}
+
+    to_insert: List[Caracteristica] = []
+    skipped = 0
+
+    for item in payload.items:
+        # Validar despliegue
+        if item.despliegue_id is None or item.despliegue_id not in despl_map:
+            skipped += 1
+            continue
+
+        # Normalizar ts_utc
+        ts = item.ts_utc
+        if ts is None:
+            skipped += 1
+            continue
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=timezone.utc)
+
+        # Construir objeto Caracteristica
+        c = Caracteristica(
+            despliegue_id=item.despliegue_id,
+            ts_utc=ts,
+            variable=item.variable,
+            caracteristica=item.caracteristica,
+            valor=item.valor,
+            ventana_s=item.ventana_s,
+            indicador_calidad=item.indicador_calidad,
+        )
+        to_insert.append(c)
+
+    if to_insert:
+        db.add_all(to_insert)
+        db.commit()
+        inserted = len(to_insert)
+    else:
+        inserted = 0
+
+    return BulkCaracteristicasResponse(inserted=inserted, skipped=skipped)
 
 
 # ============================================================

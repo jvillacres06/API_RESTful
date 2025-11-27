@@ -35,6 +35,23 @@ class ImportFromIngestasResponse(BaseModel):
     inserted: int
 
 
+# -------------------------------------------------------------------
+# Modelos para inserción masiva (bulk)
+# -------------------------------------------------------------------
+
+class BulkMedicionesRequest(BaseModel):
+    """
+    Request para inserción masiva de mediciones.
+    items: lista de MedicionCreate (misma estructura que el POST normal).
+    """
+    items: List[MedicionCreate]
+
+
+class BulkMedicionesResponse(BaseModel):
+    inserted: int
+    skipped: int
+
+
 router = APIRouter()
 
 # -------------------------------------------------------------------
@@ -70,7 +87,7 @@ def _validate_sort(sort: str, allowed: dict):
 
 
 # -------------------------------------------------------------------
-# Validación de payload
+# Validación de payload (POST individual)
 # -------------------------------------------------------------------
 
 def _validate_medicion_payload(db: Session, p: MedicionCreate):
@@ -82,6 +99,7 @@ def _validate_medicion_payload(db: Session, p: MedicionCreate):
     if not d:
         raise HTTPException(400, "despliegue_id no existe")
 
+    # OJO: en tu modelo Variable, la PK se llama "variable"
     if not db.query(Variable).filter(Variable.variable == p.variable).first():
         raise HTTPException(400, "variable no registrada en catálogo de variables")
 
@@ -92,11 +110,15 @@ def _validate_medicion_payload(db: Session, p: MedicionCreate):
     if p.ts_utc > now + timedelta(seconds=5):
         raise HTTPException(400, "ts_utc no puede estar en el futuro")
 
-    """ if d.inicio and p.ts_utc < d.inicio:
+    # Si en el futuro quieres volver a activar estas reglas, solo descomentas:
+    """
+    if d.inicio and p.ts_utc < d.inicio:
         raise HTTPException(400, "ts_utc anterior al inicio del despliegue")
     if d.fin and p.ts_utc > d.fin:
-        raise HTTPException(400, "ts_utc posterior al fin del despliegue") """
+        raise HTTPException(400, "ts_utc posterior al fin del despliegue")
+    """
 
+    # Esta condición deja la verificación de duplicados desactivada en la práctica
     dup = (
         db.query(Medicion)
         .filter(
@@ -104,13 +126,12 @@ def _validate_medicion_payload(db: Session, p: MedicionCreate):
             Medicion.variable == p.variable,
             Medicion.ts_utc == p.ts_utc
         )
-        .filter(Medicion.medicion_id != Medicion.medicion_id)  
+        .filter(Medicion.medicion_id != Medicion.medicion_id)  # siempre False
         .first()
     )
 
     if dup:
         raise HTTPException(409, "Medición duplicada")
-
 
 
 # -------------------------------------------------------------------
@@ -149,6 +170,8 @@ def import_mediciones_from_ingestas(
           AND (:variable     IS NULL OR i.variable     = :variable)
           AND (:ts_from      IS NULL OR i.ts_utc >= :ts_from)
           AND (:ts_to        IS NULL OR i.ts_utc <= :ts_to)
+        -- NOTA: para que ON CONFLICT funcione se necesita un índice único en BD
+        --       por ejemplo: UNIQUE(despliegue_id, ts_utc, variable)
         ON CONFLICT (despliegue_id, ts_utc, variable) DO NOTHING;
     """)
 
@@ -163,6 +186,109 @@ def import_mediciones_from_ingestas(
     db.commit()
 
     return ImportFromIngestasResponse(inserted=(result.rowcount or 0))
+
+
+# -------------------------------------------------------------------
+# INSERCIÓN MASIVA (BULK) DESDE EL FRONTEND / CLIENTES
+# -------------------------------------------------------------------
+
+@router.post("/bulk", response_model=BulkMedicionesResponse,
+             status_code=status.HTTP_201_CREATED)
+def bulk_create_mediciones(
+    payload: BulkMedicionesRequest,
+    db: Session = Depends(get_db),
+):
+    """
+    Inserta muchas mediciones en un solo request y un solo commit.
+
+    - Recibe: { "items": [ MedicionCreate, MedicionCreate, ... ] }
+    - Valida despliegue, variable y fecha.
+    - Normaliza ts_utc a UTC si viene sin tz.
+    - Inserta en bloque: db.add_all(...) + commit().
+    """
+
+    if READ_ONLY:
+        raise HTTPException(403, "Escritura deshabilitada (ALLOW_WRITE_MEDICIONES=false)")
+
+    if not payload.items:
+        return BulkMedicionesResponse(inserted=0, skipped=0)
+
+    now = _utc_now()
+
+    # 1) Cargar despliegues y variables necesarios en memoria (una sola consulta por cada uno)
+    despl_ids = {item.despliegue_id for item in payload.items if item.despliegue_id is not None}
+    var_names = {item.variable for item in payload.items if item.variable is not None}
+
+    despliegues = (
+        db.query(Despliegue)
+        .filter(Despliegue.despliegue_id.in_(despl_ids))
+        .all()
+    )
+    despl_map = {d.despliegue_id: d for d in despliegues}
+
+    variables = (
+        db.query(Variable)
+        .filter(Variable.variable.in_(var_names))
+        .all()
+    )
+    var_set = {v.variable for v in variables}
+
+    to_insert: List[Medicion] = []
+    skipped = 0
+
+    for item in payload.items:
+        # Normalizar ts_utc
+        ts = item.ts_utc
+        if ts is None:
+            skipped += 1
+            continue
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=timezone.utc)
+
+        # Reglas básicas de tiempo
+        if ts > now + timedelta(seconds=5):
+            skipped += 1
+            continue
+
+        # Validar despliegue
+        d = despl_map.get(item.despliegue_id)
+        if not d:
+            skipped += 1
+            continue
+
+        # Validar variable
+        if item.variable not in var_set:
+            skipped += 1
+            continue
+
+        # Si quisieras validar rango del despliegue, aquí sería el lugar:
+        """
+        if d.inicio and ts < d.inicio:
+            skipped += 1
+            continue
+        if d.fin and ts > d.fin:
+            skipped += 1
+            continue
+        """
+
+        # Construir objeto Medicion listo para insertar
+        m = Medicion(
+            despliegue_id=item.despliegue_id,
+            ts_utc=ts,
+            variable=item.variable,
+            valor=item.valor,
+            # indicador_calidad: usa default de la BD (0) o agrega si lo tienes en el schema
+        )
+        to_insert.append(m)
+
+    if to_insert:
+        db.add_all(to_insert)
+        db.commit()
+        inserted = len(to_insert)
+    else:
+        inserted = 0
+
+    return BulkMedicionesResponse(inserted=inserted, skipped=skipped)
 
 
 # -------------------------------------------------------------------
@@ -261,11 +387,16 @@ def export_mediciones_csv(
         .join(Motor, Despliegue.motor_id == Motor.motor_id)
     )
 
-    if asset_codigo: q = q.filter(Asset.asset_codigo == asset_codigo)
-    if motor_codigo: q = q.filter(Motor.motor_codigo == motor_codigo)
-    if variable:     q = q.filter(Medicion.variable == variable)
-    if ts_from:      q = q.filter(Medicion.ts_local_tz >= ts_from)
-    if ts_to:        q = q.filter(Medicion.ts_local_tz <= ts_to)
+    if asset_codigo:
+        q = q.filter(Asset.asset_codigo == asset_codigo)
+    if motor_codigo:
+        q = q.filter(Motor.motor_codigo == motor_codigo)
+    if variable:
+        q = q.filter(Medicion.variable == variable)
+    if ts_from:
+        q = q.filter(Medicion.ts_local_tz >= ts_from)
+    if ts_to:
+        q = q.filter(Medicion.ts_local_tz <= ts_to)
 
     q = q.order_by(asc(Medicion.ts_local_tz)).limit(MAX_CSV_ROWS + 1)
     rows = q.all()
@@ -299,7 +430,7 @@ def export_mediciones_csv(
 
 
 # -------------------------------------------------------------------
-# ESCRITURA
+# ESCRITURA (fila a fila)
 # -------------------------------------------------------------------
 
 @router.post("/", response_model=MedicionRead, status_code=status.HTTP_201_CREATED)

@@ -7,12 +7,19 @@ from datetime import datetime, timezone, timedelta
 from fastapi.responses import StreamingResponse
 import io, csv
 
+from pydantic import BaseModel
+
 from ..database import get_db
 from ..models.ingestas import Ingesta
 from ..models.assets import Asset
 from ..models.motores import Motor
 from ..models.variables import Variable
-from ..schemas.ingestas import IngestaCreate, IngestaRead, IngestaUpdate,IngestaListResponse
+from ..schemas.ingestas import (
+    IngestaCreate,
+    IngestaRead,
+    IngestaUpdate,
+    IngestaListResponse,
+)
 from ..config import settings
 
 router = APIRouter()
@@ -39,7 +46,9 @@ def _validate_time_window(ts_from: Optional[datetime], ts_to: Optional[datetime]
 
 def _validate_sort(sort: str, allowed: dict):
     if sort not in allowed:
-        raise HTTPException(400, f"Parámetro sort inválido. Permitidos: {', '.join(allowed.keys())}")
+        raise HTTPException(
+            400, f"Parámetro sort inválido. Permitidos: {', '.join(allowed.keys())}"
+        )
     return allowed[sort]
 
 
@@ -51,7 +60,24 @@ def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
 
+# ---------------------------------------------------------
+# MODELOS PARA INSERCIÓN MASIVA (bulk)
+# ---------------------------------------------------------
+
+class BulkIngestasRequest(BaseModel):
+    items: List[IngestaCreate]
+
+
+class BulkIngestasResponse(BaseModel):
+    inserted: int
+    skipped: int
+
+
 def _validate_ingesta_payload(db: Session, p: IngestaCreate):
+    # --- NORMALIZACIÓN DE TIMEZONE ---
+    if p.ts_utc and p.ts_utc.tzinfo is None:
+        p.ts_utc = p.ts_utc.replace(tzinfo=timezone.utc)
+
     # 1) asset y motor deben existir (si se envían)
     if p.asset_codigo:
         if not db.query(Asset).filter(Asset.asset_codigo == p.asset_codigo).first():
@@ -69,12 +95,18 @@ def _validate_ingesta_payload(db: Session, p: IngestaCreate):
         r = VARIABLE_RULES.get(p.variable)
         if r is not None:
             if not isinstance(p.valor, r.get("type", (int, float))):
-                raise HTTPException(400, f"valor debe ser numérico para variable {p.variable}")
+                raise HTTPException(
+                    400, f"valor debe ser numérico para variable {p.variable}"
+                )
             vmin, vmax = r.get("min", None), r.get("max", None)
             if vmin is not None and p.valor < vmin:
-                raise HTTPException(400, f"valor para {p.variable} menor que mínimo permitido ({vmin})")
+                raise HTTPException(
+                    400, f"valor para {p.variable} menor que mínimo permitido ({vmin})"
+                )
             if vmax is not None and p.valor > vmax:
-                raise HTTPException(400, f"valor para {p.variable} mayor que máximo permitido ({vmax})")
+                raise HTTPException(
+                    400, f"valor para {p.variable} mayor que máximo permitido ({vmax})"
+                )
 
     # 3) ts_utc obligatorio, no en futuro, no demasiado antiguo
     if not p.ts_utc:
@@ -83,19 +115,26 @@ def _validate_ingesta_payload(db: Session, p: IngestaCreate):
     if p.ts_utc > now + timedelta(seconds=5):
         raise HTTPException(400, "ts_utc no puede estar en el futuro")
     if p.ts_utc < now - timedelta(days=MAX_BACK_DAYS):
-        raise HTTPException(400, f"ts_utc no puede ser anterior a {MAX_BACK_DAYS} días")
+        raise HTTPException(
+            400, f"ts_utc no puede ser anterior a {MAX_BACK_DAYS} días"
+        )
 
     # 4) duplicados “cercanos” (misma asset/motor/variable en ±1s)
+    # OJO: aquí se dejó intencionalmente deshabilitada la búsqueda real
     dup = (
         db.query(Ingesta)
         .filter(
-            (Ingesta.asset_codigo == p.asset_codigo) if p.asset_codigo else Ingesta.asset_codigo.is_(None),
-            (Ingesta.motor_codigo == p.motor_codigo) if p.motor_codigo else Ingesta.motor_codigo.is_(None),
+            (Ingesta.asset_codigo == p.asset_codigo)
+            if p.asset_codigo
+            else Ingesta.asset_codigo.is_(None),
+            (Ingesta.motor_codigo == p.motor_codigo)
+            if p.motor_codigo
+            else Ingesta.motor_codigo.is_(None),
             Ingesta.variable == p.variable,
             Ingesta.ts_utc >= p.ts_utc - timedelta(seconds=1),
             Ingesta.ts_utc <= p.ts_utc + timedelta(seconds=1),
         )
-        .filter(Ingesta.ingesta_id != Ingesta.ingesta_id)  
+        .filter(Ingesta.ingesta_id != Ingesta.ingesta_id)  # hack: no filtra nada
         .first()
     )
     if dup:
@@ -130,15 +169,13 @@ def ingestas_by_asset_motor(
     total = q.count()
 
     # datos ordenados (del más nuevo al más viejo)
-    rows = (
-        q.order_by(desc(Ingesta.ts_local_tz), desc(Ingesta.ingesta_id))
-         .all()
-    )
+    rows = q.order_by(desc(Ingesta.ts_local_tz), desc(Ingesta.ingesta_id)).all()
 
     return {
         "total": total,
-        "items": rows
+        "items": rows,
     }
+
 
 @router.get("/", response_model=List[IngestaRead])
 def list_ingestas(
@@ -250,6 +287,122 @@ def last_n_ingestas(n: int, db: Session = Depends(get_db)):
     )
 
 
+# ---------------------------------------------------------
+# BULK: inserción masiva de ingestas
+# ---------------------------------------------------------
+
+@router.post("/bulk", response_model=BulkIngestasResponse, status_code=status.HTTP_201_CREATED)
+def bulk_create_ingestas(
+    payload: BulkIngestasRequest,
+    db: Session = Depends(get_db),
+):
+    """
+    Inserta muchas ingestas en un solo request y un solo commit.
+
+    REGLA:
+    - Si MQTT_INGEST_ENABLED == True => se bloquea la ingesta manual, igual que el POST normal.
+    """
+
+    if getattr(settings, "MQTT_INGEST_ENABLED", False):
+        raise HTTPException(403, "Ingesta manual deshabilitada (flujo MQTT activo)")
+
+    if not payload.items:
+        return BulkIngestasResponse(inserted=0, skipped=0)
+
+    # Colectar catálogos necesarios (assets, motores, variables) para evitar N consultas
+    asset_codes = {i.asset_codigo for i in payload.items if i.asset_codigo}
+    motor_codes = {i.motor_codigo for i in payload.items if i.motor_codigo}
+    variables = {i.variable for i in payload.items if i.variable}
+
+    # Mapear catálogos existentes
+    assets = {}
+    motores = {}
+    vars_valid = set()
+
+    if asset_codes:
+        rows_a = db.query(Asset).filter(Asset.asset_codigo.in_(asset_codes)).all()
+        assets = {a.asset_codigo: a for a in rows_a}
+
+    if motor_codes:
+        rows_m = db.query(Motor).filter(Motor.motor_codigo.in_(motor_codes)).all()
+        motores = {m.motor_codigo: m for m in rows_m}
+
+    if variables:
+        rows_v = db.query(Variable).filter(Variable.variable.in_(variables)).all()
+        vars_valid = {v.variable for v in rows_v}
+
+    to_insert: List[Ingesta] = []
+    skipped = 0
+
+    now = _utc_now()
+
+    for item in payload.items:
+        # 1) normalizar tz
+        ts = item.ts_utc
+        if ts is None:
+            skipped += 1
+            continue
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=timezone.utc)
+
+        # 2) validar fechas (futuro y demasiado antiguo)
+        if ts > now + timedelta(seconds=5):
+            skipped += 1
+            continue
+        if ts < now - timedelta(days=MAX_BACK_DAYS):
+            skipped += 1
+            continue
+
+        # 3) validar catálogos
+        if item.asset_codigo and item.asset_codigo not in assets:
+            skipped += 1
+            continue
+        if item.motor_codigo and item.motor_codigo not in motores:
+            skipped += 1
+            continue
+        if item.variable and item.variable not in vars_valid:
+            skipped += 1
+            continue
+
+        # 4) validar reglas de variable si existen
+        r = VARIABLE_RULES.get(item.variable)
+        if r is not None:
+            if not isinstance(item.valor, r.get("type", (int, float))):
+                skipped += 1
+                continue
+            vmin, vmax = r.get("min", None), r.get("max", None)
+            if vmin is not None and item.valor < vmin:
+                skipped += 1
+                continue
+            if vmax is not None and item.valor > vmax:
+                skipped += 1
+                continue
+
+        # Si pasa todas las validaciones, crear la entidad
+        row = Ingesta(
+            asset_codigo=item.asset_codigo,
+            motor_codigo=item.motor_codigo,
+            ts_utc=ts,
+            variable=item.variable,
+            valor=item.valor,
+            archivo_origen=item.archivo_origen,
+        )
+        to_insert.append(row)
+
+    if to_insert:
+        db.add_all(to_insert)
+        db.commit()
+        inserted = len(to_insert)
+    else:
+        inserted = 0
+
+    return BulkIngestasResponse(inserted=inserted, skipped=skipped)
+
+
+# ---------------------------------------------------------
+# CRUD individual
+# ---------------------------------------------------------
+
 @router.get("/{ingesta_id}", response_model=IngestaRead)
 def get_ingesta(ingesta_id: int, db: Session = Depends(get_db)):
     row = db.query(Ingesta).filter(Ingesta.ingesta_id == ingesta_id).first()
@@ -343,7 +496,9 @@ def export_csv(
     q = q.order_by(asc(Ingesta.ts_utc)).limit(MAX_CSV_ROWS + 1)
     rows = q.all()
     if len(rows) > MAX_CSV_ROWS:
-        raise HTTPException(413, f"Demasiadas filas para exportar (> {MAX_CSV_ROWS}). Aplique más filtros.")
+        raise HTTPException(
+            413, f"Demasiadas filas para exportar (> {MAX_CSV_ROWS}). Aplique más filtros."
+        )
 
     stream = io.StringIO()
     w = csv.writer(stream)
