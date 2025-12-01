@@ -74,3 +74,25 @@ class OPCUAService:
             raise RuntimeError("OPCUA no inicializado")
         node = self._client.get_node(node_id)
         return node.get_value()
+
+    # --- Escritura (Write-Back) ---
+    def write_node_value(self, node_id: str, valor: str):
+        """Escribe un valor en un nodo OPC UA."""
+        if not self._client:
+            raise RuntimeError("OPCUA no inicializado o desconectado.")
+
+        try:
+            node = self._client.get_node(node_id)
+            
+            try:
+                numeric_valor = float(valor)
+                node.set_value(numeric_valor)
+            except ValueError:
+                # Si no es numérico, intentamos escribirlo como string
+                node.set_value(valor)
+
+            logger.info(f"Escritura exitosa: Node {node_id} = {valor}")
+
+        except Exception as e:
+            logger.error(f"Fallo al escribir en OPC UA (Node {node_id}): {e}")
+            raise

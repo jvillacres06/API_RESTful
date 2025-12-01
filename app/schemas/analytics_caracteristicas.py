@@ -1,8 +1,13 @@
 # app/schemas/analytics_caracteristicas.py
-from pydantic import BaseModel
+
 from typing import List, Optional
 from datetime import datetime
+from pydantic import BaseModel
 
+
+# ---------------------------------
+# Base de filtros comunes
+# ---------------------------------
 
 class BaseFiltrosCaracteristicas(BaseModel):
     despliegue_id: Optional[int] = None
@@ -11,46 +16,52 @@ class BaseFiltrosCaracteristicas(BaseModel):
     ts_from: Optional[datetime] = None
     ts_to: Optional[datetime] = None
 
+    # Calidad: uno o varios valores
+    indicador_calidad: Optional[int] = None
+    indicadores_calidad: Optional[List[int]] = None
 
-# ---------- Trend ----------
+
+# ---------------------------------
+# TREND
+# ---------------------------------
 
 class CaracPoint(BaseModel):
-    ts_utc: datetime
+    ts_local_tz: datetime
     valor: Optional[float]
 
 
 class CaracSeries(BaseModel):
     variable: str
     caracteristica: str
-    nombre: str         # nombre amigable para la serie (por ejemplo "Temp:mean")
+    nombre: str
     points: List[CaracPoint]
 
 
 class CaracTrendRequest(BaseFiltrosCaracteristicas):
     variables: List[str]
     caracteristicas: List[str]
-    limit: int = 10_000
+    limit: int = 1000
 
 
 class CaracTrendResponse(BaseModel):
     series: List[CaracSeries]
 
 
-# ---------- Scatter ----------
+# ---------------------------------
+# SCATTER
+# ---------------------------------
 
 class CaracScatterPoint(BaseModel):
-    ts_utc: datetime
+    ts_local_tz: datetime
     x: Optional[float]
     y: Optional[float]
 
 
 class CaracScatterRequest(BaseFiltrosCaracteristicas):
-    # Regla de negocio: exactamente 1 variable y 2 características
     variable: str
     caracteristica_x: str
     caracteristica_y: str
-    align: str = "exact"  # "exact" | "minute" | "hour"
-    limit: int = 10_000
+    limit: int = 1000
 
 
 class CaracScatterResponse(BaseModel):
@@ -60,19 +71,21 @@ class CaracScatterResponse(BaseModel):
     points: List[CaracScatterPoint]
 
 
-# ---------- Histogram ----------
-
-class CaracHistogramRequest(BaseFiltrosCaracteristicas):
-    variable: str
-    caracteristica: str
-    bins: int = 50
-
+# ---------------------------------
+# HISTOGRAM
+# ---------------------------------
 
 class CaracHistogramBucket(BaseModel):
     bucket: int
     low: float
     high: float
     count: int
+
+
+class CaracHistogramRequest(BaseFiltrosCaracteristicas):
+    variable: str
+    caracteristica: str
+    bins: int = 20
 
 
 class CaracHistogramResponse(BaseModel):
@@ -84,7 +97,9 @@ class CaracHistogramResponse(BaseModel):
     buckets: List[CaracHistogramBucket]
 
 
-# ---------- Listas de disponibles ----------
+# ---------------------------------
+# AVAILABLE VARIABLES / CARACTERÍSTICAS
+# ---------------------------------
 
 class CaracAvailableVariablesResponse(BaseModel):
     variables: List[str]

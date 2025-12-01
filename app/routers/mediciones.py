@@ -277,7 +277,7 @@ def bulk_create_mediciones(
             ts_utc=ts,
             variable=item.variable,
             valor=item.valor,
-            # indicador_calidad: usa default de la BD (0) o agrega si lo tienes en el schema
+            # indicador_calidad: usa default de la BD (0)
         )
         to_insert.append(m)
 

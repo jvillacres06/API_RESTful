@@ -12,7 +12,7 @@ DATABASE_URL = (
 )
 
 # Motor de SQLAlchemy
-engine = create_engine(DATABASE_URL, echo=True)  # echo=True muestra queries en consola
+engine = create_engine(DATABASE_URL, echo=False)  # echo=True muestra queries en consola
 
 # Sesión local
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)

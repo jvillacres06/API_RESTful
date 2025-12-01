@@ -1,53 +1,74 @@
-from typing import List, Optional, Literal
-from pydantic import BaseModel, Field
+# app/schemas/analytics.py
+
+from typing import List, Optional
 from datetime import datetime
+from pydantic import BaseModel
 
-# ----- Requests -----
 
-class BaseFilter(BaseModel):
-    # filtros opcionales
+# ---------------------------------
+# Base de filtros comunes
+# ---------------------------------
+
+class BaseFiltrosMediciones(BaseModel):
     despliegue_id: Optional[int] = None
     asset_codigo: Optional[str] = None
     motor_codigo: Optional[str] = None
-    ts_from: Optional[datetime] = Field(None, description="UTC ISO8601")
-    ts_to: Optional[datetime] = Field(None, description="UTC ISO8601")
+    ts_from: Optional[datetime] = None
+    ts_to: Optional[datetime] = None
 
-class TrendRequest(BaseFilter):
-    variables: List[str] = Field(..., min_items=1)
-    limit: int = Field(10000, ge=1, le=200000)
+    # Calidad: uno o varios valores
+    indicador_calidad: Optional[int] = None
+    indicadores_calidad: Optional[List[int]] = None
 
-class ScatterRequest(BaseFilter):
-    variables: List[str] = Field(..., min_items=2, max_items=2,
-                                 description="Exactamente 2 variables")
-    align: Literal["exact", "minute", "hour"] = "minute"
-    limit: int = Field(10000, ge=1, le=200000)
 
-class HistogramRequest(BaseFilter):
-    variable: str
-    bins: int = Field(20, ge=2, le=2000)
-
-# ----- Responses -----
+# ---------------------------------
+# TREND
+# ---------------------------------
 
 class Point(BaseModel):
-    ts_utc: datetime
+    ts_utc: datetime   # en realidad ts_local_tz, pero se mantiene el nombre por compatibilidad
     valor: Optional[float]
+
 
 class Series(BaseModel):
     variable: str
     points: List[Point]
 
+
+class TrendRequest(BaseFiltrosMediciones):
+    variables: List[str]
+    limit: int = 1000
+
+
 class TrendResponse(BaseModel):
     series: List[Series]
 
+
+# ---------------------------------
+# SCATTER
+# ---------------------------------
+
 class ScatterPoint(BaseModel):
+    ts_utc: datetime
     x: Optional[float]
     y: Optional[float]
-    ts_utc: datetime
+
+
+class ScatterRequest(BaseFiltrosMediciones):
+    variables: List[str]          # exactamente 2 variables
+    limit: int = 1000
+    align: str = "exact"          # "exact", "minute", "hour" (se usa en el backend)
+
 
 class ScatterResponse(BaseModel):
     x_variable: str
     y_variable: str
     points: List[ScatterPoint]
+
+
+# ---------------------------------
+# HISTOGRAM
+# ---------------------------------
 
 class HistogramBucket(BaseModel):
     bucket: int
@@ -55,12 +76,23 @@ class HistogramBucket(BaseModel):
     high: float
     count: int
 
+
+class HistogramRequest(BaseFiltrosMediciones):
+    variable: str
+    bins: int = 20
+
+
 class HistogramResponse(BaseModel):
     variable: str
     min: Optional[float]
     max: Optional[float]
     bins: int
     buckets: List[HistogramBucket]
+
+
+# ---------------------------------
+# AVAILABLE VARIABLES
+# ---------------------------------
 
 class AvailableVariablesResponse(BaseModel):
     variables: List[str]

@@ -56,6 +56,15 @@ def _apply_filters(q, req: BaseFiltrosCaracteristicas, db: Session):
     if getattr(req, "ts_to", None) is not None:
         conds.append(Caracteristica.ts_local_tz <= req.ts_to)
 
+    # --------------- FILTRO POR CALIDAD -----------------------------
+    cal_list = getattr(req, "indicadores_calidad", None)
+    if cal_list:
+        conds.append(Caracteristica.indicador_calidad.in_(cal_list))
+    else:
+        cal_one = getattr(req, "indicador_calidad", None)
+        if cal_one is not None:
+            conds.append(Caracteristica.indicador_calidad == cal_one)
+
     # --------------- FILTRO POR DESPLIEGUE DIRECTO ----------------
     if getattr(req, "despliegue_id", None):
         conds.append(Caracteristica.despliegue_id == req.despliegue_id)
@@ -119,6 +128,16 @@ def carac_trend(req: CaracTrendRequest, db: Session = Depends(get_db)):
 
             rows = db.execute(q).all()
 
+            # -----------------------------------------
+            # ADAPTACIÓN PARA RANGOS LARGOS (ej. 1 mes)
+            # -----------------------------------------
+            if req.ts_from and req.ts_to:
+                span_days = (req.ts_to - req.ts_from).total_seconds() / 86400.0
+                # Si el rango es >= 30 días y hay suficientes puntos,
+                # hacemos downsampling 2:1 (para que se vea “más limpio”)
+                if span_days >= 30 and len(rows) > 1:
+                    rows = rows[::2]
+
             points = [
                 CaracPoint(ts_local_tz=r[0], valor=float(r[1]) if r[1] is not None else None)
                 for r in rows
@@ -157,7 +176,8 @@ def carac_scatter(req: CaracScatterRequest, db: Session = Depends(get_db)):
         Caracteristica.variable,
         Caracteristica.caracteristica,
         Caracteristica.valor,
-        Caracteristica.ts_local_tz
+        Caracteristica.ts_local_tz,
+        Caracteristica.indicador_calidad,
     ).where(Caracteristica.variable == req.variable)
 
     base = _apply_filters(base, req, db).subquery("base")
@@ -247,6 +267,13 @@ def carac_histogram(req: CaracHistogramRequest, db: Session = Depends(get_db)):
 
     width = (vmax - vmin) / req.bins
 
+    # Preparar lista de calidades (para el SQL textual)
+    cal_list = getattr(req, "indicadores_calidad", None)
+    if not cal_list:
+        cal_one = getattr(req, "indicador_calidad", None)
+        if cal_one is not None:
+            cal_list = [cal_one]
+
     sql = text("""
         SELECT
           width_bucket(c.valor, :vmin, :vmax, :bins) AS b,
@@ -264,6 +291,10 @@ def carac_histogram(req: CaracHistogramRequest, db: Session = Depends(get_db)):
           AND (:despliegue_id IS NULL OR c.despliegue_id = :despliegue_id)
           AND (:asset_codigo  IS NULL OR a.asset_codigo = :asset_codigo)
           AND (:motor_codigo  IS NULL OR mo.motor_codigo = :motor_codigo)
+          AND (
+                :has_calidad = FALSE
+                OR c.indicador_calidad = ANY(:calidades)
+              )
         GROUP BY b
         ORDER BY b
     """)
@@ -279,6 +310,8 @@ def carac_histogram(req: CaracHistogramRequest, db: Session = Depends(get_db)):
         "despliegue_id": req.despliegue_id,
         "asset_codigo": req.asset_codigo,
         "motor_codigo": req.motor_codigo,
+        "has_calidad": bool(cal_list),
+        "calidades": cal_list if cal_list else [0],
     }).all()
 
     buckets = [
@@ -317,7 +350,8 @@ def carac_available_variables(
 ):
     _validate_time_window(ts_from, ts_to)
 
-    class R: pass
+    class R:
+        pass
 
     req = R()
     req.despliegue_id = despliegue_id
@@ -325,6 +359,8 @@ def carac_available_variables(
     req.motor_codigo = motor_codigo
     req.ts_from = ts_from
     req.ts_to = ts_to
+    # Si algún día quieres filtrar por calidad aquí, puedes setear:
+    # req.indicadores_calidad = [...]
 
     q = select(Caracteristica.variable).distinct()
     q = _apply_filters(q, req, db).order_by(Caracteristica.variable.asc())
@@ -350,7 +386,8 @@ def carac_available_caracteristicas(
 ):
     _validate_time_window(ts_from, ts_to)
 
-    class R: pass
+    class R:
+        pass
 
     req = R()
     req.despliegue_id = despliegue_id
@@ -390,7 +427,8 @@ def carac_export_csv(
     _validate_time_window(ts_from, ts_to)
     limit = _clamp_limit(limit, MAX_EXPORT_ROWS)
 
-    class R: pass
+    class R:
+        pass
 
     req = R()
     req.despliegue_id = despliegue_id

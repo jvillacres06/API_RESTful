@@ -1,5 +1,5 @@
 from fastapi import FastAPI, Depends
-from .routers import assets, motores, variables, unidades, despliegues, mediciones, ingestas, opcua, health, analytics, debug_config, caracteristicas, indicador_calidad, analytics_caracteristicas
+from .routers import assets, motores, variables, unidades, despliegues, mediciones, ingestas, opcua, health, analytics, debug_config, caracteristicas, indicador_calidad, analytics_caracteristicas, mediciones_limpias
 from .mqtt_client import mqtt_client
 from .security import api_key_guard
 from .config import settings
@@ -19,13 +19,14 @@ app.include_router(motores.router,     prefix="/api/motores",     tags=["motores
 app.include_router(despliegues.router, prefix="/api/despliegues", tags=["despliegues"])
 app.include_router(ingestas.router,   prefix="/api/ingestas",   tags=["ingestas"],   dependencies=[Depends(api_key_guard)])
 app.include_router(mediciones.router, prefix="/api/mediciones", tags=["mediciones"], dependencies=[Depends(api_key_guard)])
-app.include_router(caracteristicas.router, prefix="/api/caracteristicas",    tags=["caracteristicas"])
+app.include_router(mediciones_limpias.router, prefix="/api/mediciones_limpias", tags=["mediciones_limpias"], dependencies=[Depends(api_key_guard)])
+app.include_router(caracteristicas.router, prefix="/api/caracteristicas",    tags=["caracteristicas"], dependencies=[Depends(api_key_guard)])
 app.include_router(indicador_calidad.router, prefix="/api/indicador_calidad",    tags=["indicador_calidad"])
-app.include_router(analytics.router,  prefix="/api/analytics",  tags=["analytics_mediciones"])
-app.include_router(analytics_caracteristicas.router,  prefix="/api/analytics_caracteristicas",  tags=["analytics_caracteristicas"])
-app.include_router(debug_config.router, prefix="/api/debug",    tags=["debug"])
-app.include_router(opcua.router,      prefix="/api/opcua",      tags=["opcua"],      dependencies=[Depends(api_key_guard)])
-app.include_router(health.router,                              tags=["infra"])
+app.include_router(analytics.router,  prefix="/api/analytics",  tags=["analytics_mediciones"], dependencies=[Depends(api_key_guard)])
+app.include_router(analytics_caracteristicas.router,  prefix="/api/analytics_caracteristicas",  tags=["analytics_caracteristicas"], dependencies=[Depends(api_key_guard)])
+app.include_router(debug_config.router, prefix="/api/debug",    tags=["debug"], dependencies=[Depends(api_key_guard)])
+app.include_router(opcua.router,      prefix="/api/opcua",      tags=["opcua"], dependencies=[Depends(api_key_guard)])
+app.include_router(health.router,                               tags=["infra"], dependencies=[Depends(api_key_guard)])
 
 @app.on_event("startup")
 def startup():

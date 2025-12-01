@@ -16,11 +16,13 @@ _opcua: Optional[OPCUAService] = None
 _stop_flag: bool = False
 _timer_ref: Optional[threading.Timer] = None
 
+
 def _enabled() -> bool:
     try:
         return bool(getattr(settings, "OPCUA_INGEST_ENABLED", False))
     except Exception:
         return False
+
 
 def _get_client() -> OPCUAService:
     """Obtiene cliente OPC UA conectado una vez."""
@@ -30,6 +32,7 @@ def _get_client() -> OPCUAService:
         _opcua.connect()
     return _opcua
 
+
 def _ensure_connected_with_backoff() -> OPCUAService:
     """Asegura sesión viva con backoff exponencial."""
     global _opcua
@@ -38,10 +41,10 @@ def _ensure_connected_with_backoff() -> OPCUAService:
         try:
             if _opcua is None:
                 _opcua = OPCUAService(settings.OPCUA_ENDPOINT)
-            # Si tu OPCUAService no tiene is_connected(), elimina esta línea
+            # Si tu OPCUAService no tiene is_connected(), se puede eliminar esto
             if hasattr(_opcua, "is_connected") and not _opcua.is_connected():
                 _opcua.connect()
-            # Ping para validar sesion (si no existe ping(), comenta esta línea)
+            # Ping para validar sesión (si no existe ping(), comentar esta línea)
             if hasattr(_opcua, "ping"):
                 _opcua.ping()
             return _opcua
@@ -56,10 +59,12 @@ def _ensure_connected_with_backoff() -> OPCUAService:
             time.sleep(backoff)
             backoff = min(max_backoff, backoff * 2 + random.random())
 
+
 def _tick():
     """
     Lee nodos OPC UA y publica por MQTT para monitoreo.
-    NO escribe en BD. NO consulta BD por defecto.
+    NO escribe en BD.
+    Puede resolver asset/motor desde BD a partir de despliegue_id.
     """
     global _timer_ref, _stop_flag, _opcua
     if _stop_flag or not _enabled():
@@ -72,17 +77,19 @@ def _tick():
 
         if not nodes:
             logger.warning("OPCUA_NODES_JSON vacío; no hay nodos que leer")
-            # Reintento lento para evitar spam
+          
             if not _stop_flag and _enabled():
-                _timer_ref = threading.Timer(max(30, settings.OPCUA_INGEST_INTERVAL_SEC * 6), _tick)
+                _timer_ref = threading.Timer(
+                    max(30, settings.OPCUA_INGEST_INTERVAL_SEC * 6),
+                    _tick
+                )
                 _timer_ref.daemon = True
                 _timer_ref.start()
             return
 
-        # ¿Permitir resolución de asset/motor desde BD? (por defecto: False)
-        resolve_from_db = bool(getattr(settings, "OPCUA_RESOLVE_FROM_DB", False))
+        # Por defecto: resolver SIEMPRE desde BD (pensado a futuro)
+        resolve_from_db = bool(getattr(settings, "OPCUA_RESOLVE_FROM_DB", True))
         if resolve_from_db:
-            # Carga perezosa para evitar import si no se usa
             from sqlalchemy.orm import Session
             from ..database import SessionLocal
             from ..models.despliegues import Despliegue
@@ -118,7 +125,7 @@ def _tick():
                     logger.warning(f"Nodo inválido en OPCUA_NODES_JSON: {n}")
                     continue
 
-                # Leer valor
+                # Leer valor OPC UA
                 try:
                     value = client.read_node_value(node_id)
                 except Exception as e:
@@ -131,19 +138,23 @@ def _tick():
                     _opcua = None
                     break  # salta a próximo ciclo
 
-                # Asset/Motor tal cual vengan en el JSON (sin tocar BD)
-                asset_codigo = n.get("asset_codigo")
-                motor_codigo = n.get("motor_codigo")
+                # Se asume que el JSON trae SOLO despliegue_id y opcional indicador_calidad
                 despliegue_id = n.get("despliegue_id")
+                indicador_calidad = n.get("indicador_calidad", 0)
 
-                # Si y solo si está habilitado y faltan, resolver desde BD
-                if resolve_from_db and (despliegue_id is not None) and (not asset_codigo or not motor_codigo):
+                asset_codigo = None
+                motor_codigo = None
+
+                # Resolver siempre desde BD si está habilitado y hay despliegue_id
+                if resolve_from_db and despliegue_id is not None:
                     try:
                         ac, mc = _resolve_asset_motor_from_despliegue(db, int(despliegue_id))  # type: ignore
-                        asset_codigo = asset_codigo or ac
-                        motor_codigo = motor_codigo or mc
+                        asset_codigo = ac
+                        motor_codigo = mc
                     except Exception as e:
-                        logger.warning(f"No se pudo resolver asset/motor para despliegue_id={despliegue_id}: {e}")
+                        logger.warning(
+                            f"No se pudo resolver asset/motor para despliegue_id={despliegue_id}: {e}"
+                        )
 
                 # Publicación MQTT opcional
                 if getattr(settings, "OPCUA_INGEST_PUBLISH_MQTT", False):
@@ -153,11 +164,16 @@ def _tick():
                         "despliegue_id": despliegue_id,
                         "variable": variable,
                         "valor": value,
-                        "ts_utc": now_utc.isoformat(),
+                        "indicador_calidad": indicador_calidad,
+                        "ts_utc": now_utc.replace(microsecond=0).isoformat(),
+                        "source": "opcua",
                     }
                     mqtt_client.publish("tesis/opcua/medicion", payload)
 
-                logger.info(f"[OPCUA] {variable}={value} ts={now_utc.isoformat()}")
+                logger.info(
+                    f"[OPCUA] despliegue={despliegue_id} asset={asset_codigo} "
+                    f"motor={motor_codigo} {variable}={value} ts={now_utc.isoformat()}"
+                )
 
         finally:
             if db:
@@ -178,6 +194,7 @@ def _tick():
         _timer_ref.daemon = True
         _timer_ref.start()
 
+
 def start_ingestor():
     """Inicia el ingestor si está habilitado en settings."""
     if not _enabled():
@@ -186,7 +203,8 @@ def start_ingestor():
     global _stop_flag
     _stop_flag = False
     _tick()
-    logger.info("Ingestor OPC UA iniciado (solo MQTT opcional, sin escritura en BD)")
+    logger.info("Ingestor OPC UA iniciado (solo MQTT, sin escritura en BD)")
+
 
 def stop_ingestor():
     """Detiene el ingestor y cierra sesión OPC UA."""
