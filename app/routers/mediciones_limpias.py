@@ -278,7 +278,7 @@ def bulk_create_mediciones(
             ts_utc=ts,
             variable=item.variable,
             valor=item.valor,
-            indicador_preprocesamiento=item.indicador_preprocesamiento
+            indicador_preprocesamiento=item.indicador_preprocesamiento,
         )
         to_insert.append(m)
 
