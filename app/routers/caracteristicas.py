@@ -7,6 +7,7 @@ from typing import List, Optional
 from datetime import datetime, timezone
 from fastapi.responses import StreamingResponse
 import io, csv
+from app.models.indicador_preprocesamiento import IndicadorPreprocesamiento
 
 from ..database import get_db
 from ..models.caracteristicas import Caracteristica
@@ -61,7 +62,7 @@ def list_caracteristicas(
     variable: Optional[str] = Query(None),
     caracteristica: Optional[str] = Query(None),
     ventana_s: Optional[int] = Query(None),
-    indicador_calidad: Optional[int] = Query(None),
+    indicador_preprocesamiento: Optional[int] = Query(None),
     ts_from: Optional[datetime] = Query(None),
     ts_to: Optional[datetime] = Query(None),
     sort: str = Query(
@@ -94,8 +95,8 @@ def list_caracteristicas(
         q = q.filter(Caracteristica.caracteristica == caracteristica)
     if ventana_s is not None:
         q = q.filter(Caracteristica.ventana_s == ventana_s)
-    if indicador_calidad is not None:
-        q = q.filter(Caracteristica.indicador_calidad == indicador_calidad)
+    if indicador_preprocesamiento is not None:
+        q = q.filter(Caracteristica.indicador_preprocesamiento == indicador_preprocesamiento)
 
     # FILTRO TEMPORAL - AHORA por ts_local_tz
     if ts_from:
@@ -158,7 +159,7 @@ def export_caracteristicas_csv(
     variable: Optional[str] = None,
     caracteristica: Optional[str] = None,
     ventana_s: Optional[int] = None,
-    indicador_calidad: Optional[int] = None,
+    indicador_preprocesamiento: Optional[int] = None,
     ts_from: Optional[datetime] = None,
     ts_to: Optional[datetime] = None,
     db: Session = Depends(get_db),
@@ -176,7 +177,7 @@ def export_caracteristicas_csv(
     if variable: q = q.filter(Caracteristica.variable == variable)
     if caracteristica: q = q.filter(Caracteristica.caracteristica == caracteristica)
     if ventana_s is not None: q = q.filter(Caracteristica.ventana_s == ventana_s)
-    if indicador_calidad is not None: q = q.filter(Caracteristica.indicador_calidad == indicador_calidad)
+    if indicador_preprocesamiento is not None: q = q.filter(Caracteristica.indicador_preprocesamiento == indicador_preprocesamiento)
 
     # filtro temporal por ts_local_tz
     if ts_from: q = q.filter(Caracteristica.ts_local_tz >= ts_from)
@@ -201,7 +202,7 @@ def export_caracteristicas_csv(
         "caracteristica",
         "valor",
         "ventana_s",
-        "indicador_calidad",
+        "indicador_preprocesamiento",
         "generado_en",
     ])
 
@@ -217,7 +218,7 @@ def export_caracteristicas_csv(
             c.caracteristica,
             c.valor,
             c.ventana_s,
-            c.indicador_calidad,
+            c.indicador_preprocesamiento,
             c.generado_en,
         ])
 
@@ -284,7 +285,7 @@ def bulk_create_caracteristicas(
             caracteristica=item.caracteristica,
             valor=item.valor,
             ventana_s=item.ventana_s,
-            indicador_calidad=item.indicador_calidad,
+            indicador_preprocesamiento=item.indicador_preprocesamiento,
         )
         to_insert.append(c)
 

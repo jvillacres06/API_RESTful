@@ -4,7 +4,7 @@ from sqlalchemy import (
 )
 from ..database import Base
 
-class Medicion(Base):
+class MedicionLimpia(Base):
     __tablename__ = "mediciones_limpias"
     __table_args__ = {"schema": "iot"}
 
@@ -31,9 +31,9 @@ class Medicion(Base):
     variable = Column(Text, nullable=False)   # FK a iot.variables(variable) en BD
     valor    = Column(Numeric, nullable=True)
 
-    indicador_calidad = Column(
+    indicador_preprocesamiento = Column(
         SmallInteger,
-        ForeignKey("iot.indicador_calidad.codigo_calidad"),
+        ForeignKey("iot.indicador_preprocesamiento.codigo_calidad"),
         server_default=text("0"),
         nullable=False
     )

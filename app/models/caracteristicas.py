@@ -44,9 +44,9 @@ class Caracteristica(Base):
     valor = Column(Numeric, nullable=True)
     ventana_s = Column(Integer, nullable=False)
 
-    indicador_calidad = Column(
+    indicador_preprocesamiento = Column(
         SmallInteger,
-        ForeignKey("iot.indicador_calidad.codigo_calidad"),
+        ForeignKey("iot.indicador_preprocesamiento.codigo_calidad"),
         nullable=False,
         server_default=text("0"),
     )

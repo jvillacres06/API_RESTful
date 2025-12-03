@@ -7,14 +7,14 @@ class MedicionBase(BaseModel):
     ts_utc: datetime
     variable: str
     valor: Optional[float] = None
-    indicador_calidad: int = 0   # NUEVO
+    indicador_preprocesamiento: int = 0   # NUEVO
 
 class MedicionCreate(MedicionBase):
     pass
 
 class MedicionUpdate(BaseModel):
     valor: Optional[float] = None
-    indicador_calidad: Optional[int] = None
+    indicador_preprocesamiento: Optional[int] = None
 
 class MedicionRead(MedicionBase):
     medicion_id: int

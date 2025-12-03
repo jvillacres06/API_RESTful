@@ -12,7 +12,7 @@ class CaracteristicaBase(BaseModel):
     caracteristica: str = Field(..., max_length=100)
     valor: Optional[Decimal] = None
     ventana_s: int
-    indicador_calidad: int = 0
+    indicador_preprocesamiento: int = 0
 
 
 class CaracteristicaCreate(CaracteristicaBase):
@@ -25,7 +25,7 @@ class CaracteristicaUpdate(BaseModel):
     caracteristica: Optional[str] = Field(None, max_length=100)
     valor: Optional[Decimal] = None
     ventana_s: Optional[int] = None
-    indicador_calidad: Optional[int] = None
+    indicador_preprocesamiento: Optional[int] = None
 
     class Config:
         extra = "forbid"

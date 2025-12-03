@@ -5,9 +5,10 @@ from typing import List, Optional
 from datetime import datetime, timezone, timedelta
 from fastapi.responses import StreamingResponse
 import io, csv
+from app.models.indicador_preprocesamiento import IndicadorPreprocesamiento
 
 from ..database import get_db
-from ..models.mediciones_limpias import Medicion
+from ..models.mediciones_limpias import MedicionLimpia
 from ..models.despliegues import Despliegue
 from ..models.assets import Asset
 from ..models.motores import Motor
@@ -28,7 +29,7 @@ class ImportFromIngestasRequest(BaseModel):
     variable: Optional[str] = None
     ts_from: Optional[datetime] = None
     ts_to: Optional[datetime] = None
-    indicador_calidad: int = 0
+    indicador_preprocesamiento: int = 0
 
 
 class ImportFromIngestasResponse(BaseModel):
@@ -120,13 +121,13 @@ def _validate_medicion_payload(db: Session, p: MedicionCreate):
 
     # Esta condición deja la verificación de duplicados desactivada en la práctica
     dup = (
-        db.query(Medicion)
+        db.query(MedicionLimpia)
         .filter(
-            Medicion.despliegue_id == p.despliegue_id,
-            Medicion.variable == p.variable,
-            Medicion.ts_utc == p.ts_utc
+            MedicionLimpia.despliegue_id == p.despliegue_id,
+            MedicionLimpia.variable == p.variable,
+            MedicionLimpia.ts_utc == p.ts_utc
         )
-        .filter(Medicion.medicion_id != Medicion.medicion_id)  # siempre False
+        .filter(MedicionLimpia.medicion_id != MedicionLimpia.medicion_id)  # siempre False
         .first()
     )
 
@@ -144,16 +145,16 @@ def import_mediciones_from_ingestas(
     db: Session = Depends(get_db),
 ):
     sql = text("""
-        INSERT INTO iot.mediciones (
+        INSERT INTO iot.mediciones_limpias (
             despliegue_id, ts_utc, variable, valor,
-            indicador_calidad
+            indicador_preprocesamiento
         )
         SELECT
             d.despliegue_id,
             i.ts_utc,
             i.variable,
             i.valor,
-            :indicador_calidad
+            :indicador_preprocesamiento
         FROM raw.ingestas i
         JOIN iot.assets a
           ON a.asset_codigo = i.asset_codigo
@@ -181,7 +182,7 @@ def import_mediciones_from_ingestas(
         "variable": payload.variable,
         "ts_from": payload.ts_from,
         "ts_to": payload.ts_to,
-        "indicador_calidad": payload.indicador_calidad,
+        "indicador_preprocesamiento": payload.indicador_preprocesamiento,
     })
     db.commit()
 
@@ -233,7 +234,7 @@ def bulk_create_mediciones(
     )
     var_set = {v.variable for v in variables}
 
-    to_insert: List[Medicion] = []
+    to_insert: List[MedicionLimpia] = []
     skipped = 0
 
     for item in payload.items:
@@ -272,12 +273,12 @@ def bulk_create_mediciones(
         """
 
         # Construir objeto Medicion listo para insertar
-        m = Medicion(
+        m = MedicionLimpia(
             despliegue_id=item.despliegue_id,
             ts_utc=ts,
             variable=item.variable,
             valor=item.valor,
-            # indicador_calidad: usa default de la BD (0)
+            # indicador_preprocesamiento: usa default de la BD (0)
         )
         to_insert.append(m)
 
@@ -301,8 +302,8 @@ def latest_mediciones(
     db: Session = Depends(get_db),
 ):
     q = (
-        db.query(Medicion)
-        .order_by(desc(Medicion.ts_local_tz), desc(Medicion.medicion_id))
+        db.query(MedicionLimpia)
+        .order_by(desc(MedicionLimpia.ts_local_tz), desc(MedicionLimpia.medicion_id))
         .limit(_clamp_limit(limit))
     )
     return q.all()
@@ -311,8 +312,8 @@ def latest_mediciones(
 @router.get("/last/{n}", response_model=List[MedicionRead])
 def last_n_mediciones(n: int, db: Session = Depends(get_db)):
     q = (
-        db.query(Medicion)
-        .order_by(desc(Medicion.ts_local_tz), desc(Medicion.medicion_id))
+        db.query(MedicionLimpia)
+        .order_by(desc(MedicionLimpia.ts_local_tz), desc(MedicionLimpia.medicion_id))
         .limit(_clamp_limit(n))
     )
     return q.all()
@@ -333,8 +334,8 @@ def list_mediciones(
     _validate_time_window(ts_from, ts_to)
 
     q = (
-        db.query(Medicion)
-        .join(Despliegue, Medicion.despliegue_id == Despliegue.despliegue_id)
+        db.query(MedicionLimpia)
+        .join(Despliegue, MedicionLimpia.despliegue_id == Despliegue.despliegue_id)
         .join(Asset, Despliegue.asset_id == Asset.asset_id)
         .join(Motor, Despliegue.motor_id == Motor.motor_id)
     )
@@ -344,19 +345,19 @@ def list_mediciones(
     if motor_codigo:
         q = q.filter(Motor.motor_codigo == motor_codigo)
     if variable:
-        q = q.filter(Medicion.variable == variable)
+        q = q.filter(MedicionLimpia.variable == variable)
     if ts_from:
-        q = q.filter(Medicion.ts_local_tz >= ts_from)
+        q = q.filter(MedicionLimpia.ts_local_tz >= ts_from)
     if ts_to:
-        q = q.filter(Medicion.ts_local_tz <= ts_to)
+        q = q.filter(MedicionLimpia.ts_local_tz <= ts_to)
 
     sort_map = {
-        "ts_utc": Medicion.ts_utc,
-        "-ts_utc": desc(Medicion.ts_utc),
-        "ts_local_tz": Medicion.ts_local_tz,
-        "-ts_local_tz": desc(Medicion.ts_local_tz),
-        "variable": Medicion.variable,
-        "-variable": desc(Medicion.variable),
+        "ts_utc": MedicionLimpia.ts_utc,
+        "-ts_utc": desc(MedicionLimpia.ts_utc),
+        "ts_local_tz": MedicionLimpia.ts_local_tz,
+        "-ts_local_tz": desc(MedicionLimpia.ts_local_tz),
+        "variable": MedicionLimpia.variable,
+        "-variable": desc(MedicionLimpia.variable),
     }
 
     sort_col = _validate_sort(sort, sort_map)
@@ -381,8 +382,8 @@ def export_mediciones_csv(
     _validate_time_window(ts_from, ts_to)
 
     q = (
-        db.query(Medicion, Asset.asset_codigo, Motor.motor_codigo)
-        .join(Despliegue, Medicion.despliegue_id == Despliegue.despliegue_id)
+        db.query(MedicionLimpia, Asset.asset_codigo, Motor.motor_codigo)
+        .join(Despliegue, MedicionLimpia.despliegue_id == Despliegue.despliegue_id)
         .join(Asset, Despliegue.asset_id == Asset.asset_id)
         .join(Motor, Despliegue.motor_id == Motor.motor_id)
     )
@@ -392,13 +393,13 @@ def export_mediciones_csv(
     if motor_codigo:
         q = q.filter(Motor.motor_codigo == motor_codigo)
     if variable:
-        q = q.filter(Medicion.variable == variable)
+        q = q.filter(MedicionLimpia.variable == variable)
     if ts_from:
-        q = q.filter(Medicion.ts_local_tz >= ts_from)
+        q = q.filter(MedicionLimpia.ts_local_tz >= ts_from)
     if ts_to:
-        q = q.filter(Medicion.ts_local_tz <= ts_to)
+        q = q.filter(MedicionLimpia.ts_local_tz <= ts_to)
 
-    q = q.order_by(asc(Medicion.ts_local_tz)).limit(MAX_CSV_ROWS + 1)
+    q = q.order_by(asc(MedicionLimpia.ts_local_tz)).limit(MAX_CSV_ROWS + 1)
     rows = q.all()
 
     if len(rows) > MAX_CSV_ROWS:
@@ -440,7 +441,7 @@ def create_medicion(payload: MedicionCreate, db: Session = Depends(get_db)):
 
     _validate_medicion_payload(db, payload)
 
-    m = Medicion(**payload.dict())
+    m = MedicionLimpia(**payload.dict())
     db.add(m)
     db.commit()
     db.refresh(m)
@@ -450,7 +451,7 @@ def create_medicion(payload: MedicionCreate, db: Session = Depends(get_db)):
     mo = db.query(Motor).filter(Motor.motor_id == d.motor_id).first() if d else None
 
     try:
-        mqtt_client.publish("tesis/mediciones/nueva", {
+        mqtt_client.publish("tesis/MedicionLimpiaes/nueva", {
             "medicion_id": m.medicion_id,
             "despliegue_id": m.despliegue_id,
             "variable": m.variable,
@@ -478,7 +479,7 @@ def update_medicion(medicion_id: int, payload: MedicionUpdate, db: Session = Dep
     if READ_ONLY:
         raise HTTPException(403, "Escritura deshabilitada (ALLOW_WRITE_MEDICIONES=false)")
 
-    m = db.query(Medicion).filter(Medicion.medicion_id == medicion_id).first()
+    m = db.query(MedicionLimpia).filter(MedicionLimpia.medicion_id == medicion_id).first()
     if not m:
         raise HTTPException(404, "Medición no encontrada")
 
@@ -525,7 +526,7 @@ def delete_medicion(medicion_id: int, db: Session = Depends(get_db)):
     if READ_ONLY:
         raise HTTPException(403, "Escritura deshabilitada (ALLOW_WRITE_MEDICIONES=false)")
 
-    m = db.query(Medicion).filter(Medicion.medicion_id == medicion_id).first()
+    m = db.query(MedicionLimpia).filter(MedicionLimpia.medicion_id == medicion_id).first()
 
     if not m:
         raise HTTPException(404, "Medición no encontrada")
